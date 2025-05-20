@@ -4,6 +4,12 @@ import fitz
 import streamlit as st
 from decouple import config
 from openai import OpenAI
+import json
+import os
+import tiktoken
+
+MAX_TOKENS = 65000
+encoding = tiktoken.encoding_for_model("gpt-4")  # Substitute with DeepSeek-compatible model name if needed
 
 API_KEY = config("DEEPSEEK_API_KEY", default="")
 
@@ -12,15 +18,58 @@ DEFAULT_CONTEXT = "You are a helpful assistant. Provide clear and concise answer
 
 client = OpenAI(api_key=API_KEY, base_url="https://api.deepseek.com")
 
+DEFAULT_PROMPT_FILE = "default_prompt.json"
+MAX_FILE_CONTEXT_LENGTH = 65000
+
+def save_default_prompt(prompt):
+    with open(DEFAULT_PROMPT_FILE, 'w') as f:
+        json.dump({"prompt": prompt}, f)
+
+def load_default_prompt():
+    if os.path.exists(DEFAULT_PROMPT_FILE):
+        with open(DEFAULT_PROMPT_FILE, 'r') as f:
+            return json.load(f).get("prompt", "")
+    return ""
+
+def truncate_to_token_limit(text, max_tokens):
+    tokens = encoding.encode(text)
+    if len(tokens) <= max_tokens:
+        return text
+    truncated = encoding.decode(tokens[:max_tokens])
+    return truncated + "\n...[TRUNCATED]"
+
 # Initialize session state variables
 if "chat_history" not in st.session_state:
     st.session_state["chat_history"] = []
-if "file_context" not in st.session_state:
-    st.session_state["file_context"] = ""
+
 if "default_prompt" not in st.session_state:
-    st.session_state["default_prompt"] = ""
+    st.session_state["default_prompt"] = load_default_prompt()
+
+if "file_context" not in st.session_state:
+    st.session_state["file_context"] = []
+
 if "temperature" not in st.session_state:
     st.session_state["temperature"] = 0
+
+# Initialize system content with default context
+system_content = DEFAULT_CONTEXT
+
+# Add default prompt if exists
+if st.session_state["default_prompt"]:
+    system_content += f"\n\nDefault Prompt:\n{st.session_state['default_prompt']}"
+
+# Add uploaded file content to system context if exists
+if st.session_state["file_context"]:
+    all_file_contexts = []
+    for file in st.session_state["file_context"]:
+        file_summary = f"File: {file['name']}\nContent:\n{file['content']}"
+        all_file_contexts.append(file_summary)
+    joined_file_context = "\n\n".join(all_file_contexts)
+
+    if len(joined_file_context) > MAX_FILE_CONTEXT_LENGTH:
+        joined_file_context = truncate_to_token_limit(joined_file_context, MAX_TOKENS)
+
+    system_content += f"\n\nUploaded Files Context:\n{joined_file_context}"
 
 def call_deepseek_api(messages, streaming=True, temperature=None):
     try:
@@ -104,6 +153,7 @@ with st.sidebar:
     with col1:
         if st.button("Save Default Prompt"):
             st.session_state["default_prompt"] = default_prompt
+            save_default_prompt(default_prompt)
     with col2:
         if st.button("Clear Default Prompt"):
             st.session_state["default_prompt"] = ""
@@ -163,10 +213,7 @@ with st.sidebar:
                     "content": file_content
                 })
 
-        st.session_state["file_context"] = "\n\n".join(
-            f"File: {file['name']}\nContent:\n{file['content']}" 
-            for file in all_file_contents
-        )
+        st.session_state["file_context"] = all_file_contents
 
         st.success(f"Loaded {len(uploaded_files)} file(s)")
         if st.checkbox("Show file contents"):
@@ -227,11 +274,20 @@ if user_input:
         system_content = DEFAULT_CONTEXT
         if st.session_state["default_prompt"]:
             system_content += f"\n\nDefault Prompt:\n{st.session_state['default_prompt']}"
-        if st.session_state["file_context"]:
-            file_context = st.session_state["file_context"]
-            if len(file_context) > 5000:
-                file_context = file_context[:5000] + "... (truncated)"
-            system_content += f"\n\nFile Context:\n{file_context}"
+        
+        # Add uploaded file content to system context
+        if "file_context" in st.session_state and st.session_state["file_context"]:
+            all_file_contexts = []
+            for file in st.session_state["file_context"]:
+                file_summary = f"File: {file['name']}\nContent:\n{file['content']}"
+                all_file_contexts.append(file_summary)
+            joined_file_context = "\n\n".join(all_file_contexts)
+
+            # Truncate to token limit if needed
+            if len(joined_file_context) > MAX_FILE_CONTEXT_LENGTH:
+                joined_file_context = truncate_to_token_limit(joined_file_context, MAX_TOKENS)
+
+            system_content += f"\n\nUploaded Files Context:\n{joined_file_context}"
 
         # Build message history
         messages = [{"role": "system", "content": system_content}]
