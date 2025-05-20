@@ -7,9 +7,14 @@ from openai import OpenAI
 import json
 import os
 import tiktoken
+import uuid
+from datetime import datetime
+import glob  # Add this import
 
 MAX_TOKENS = 65000
 encoding = tiktoken.encoding_for_model("gpt-4")  # Substitute with DeepSeek-compatible model name if needed
+CHAT_HISTORY_DIR = "chat_history"
+os.makedirs(CHAT_HISTORY_DIR, exist_ok=True)
 
 API_KEY = config("DEEPSEEK_API_KEY", default="")
 
@@ -20,6 +25,30 @@ client = OpenAI(api_key=API_KEY, base_url="https://api.deepseek.com")
 
 DEFAULT_PROMPT_FILE = "default_prompt.json"
 MAX_FILE_CONTEXT_LENGTH = 65000
+
+def save_chat_session(chat_history):
+    session_id = str(uuid.uuid4())
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    filename = f"{CHAT_HISTORY_DIR}/{timestamp}_{session_id}.json"
+
+    with open(filename, 'w') as f:
+        json.dump({
+            "id": session_id,
+            "timestamp": timestamp,
+            "chat_history": chat_history,
+            "default_prompt": st.session_state.get("default_prompt", ""),
+            "file_context": st.session_state.get("file_context", [])
+        }, f)
+    return filename
+
+def load_chat_session(filename):
+    with open(filename, 'r') as f:
+        data = json.load(f)
+        return data
+
+def list_saved_chats():
+    files = sorted(glob.glob(f"{CHAT_HISTORY_DIR}/*.json"), reverse=True)
+    return files
 
 def save_default_prompt(prompt):
     with open(DEFAULT_PROMPT_FILE, 'w') as f:
@@ -225,6 +254,46 @@ with st.sidebar:
     if st.button("Clear Chat History"):
         st.session_state["chat_history"] = []
         st.rerun()
+
+    st.subheader("Chat History")
+
+    # Save current chat button
+    if st.button("💾 Save Current Chat"):
+        if st.session_state["chat_history"]:
+            filename = save_chat_session(st.session_state["chat_history"])
+            st.success(f"Chat saved as {os.path.basename(filename)}")
+        else:
+            st.warning("No chat history to save")
+
+    # List of saved chats
+    saved_chats = list_saved_chats()
+    if saved_chats:
+        st.write("Saved Chats:")
+        selected_chat = st.selectbox(
+            "Select a chat to load",
+            [os.path.basename(f) for f in saved_chats],
+            index=0,
+            key="chat_selector"
+        )
+
+        if st.button("📂 Load Selected Chat"):
+            selected_file = os.path.join(CHAT_HISTORY_DIR, selected_chat)
+            chat_data = load_chat_session(selected_file)
+
+            st.session_state["chat_history"] = chat_data["chat_history"]
+            st.session_state["default_prompt"] = chat_data["default_prompt"]
+            st.session_state["file_context"] = chat_data["file_context"]
+
+            st.success(f"Loaded chat: {selected_chat}")
+            st.rerun()
+
+        if st.button("🗑️ Delete Selected Chat"):
+            selected_file = os.path.join(CHAT_HISTORY_DIR, selected_chat)
+            os.remove(selected_file)
+            st.success(f"Deleted chat: {selected_chat}")
+            st.rerun()
+    else:
+        st.write("No saved chats yet")
 
 # Main chat area container with auto-scrolling
 with st.container():
