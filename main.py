@@ -6,15 +6,7 @@ from decouple import config
 from openai import OpenAI
 import json
 import os
-import tiktoken
-import uuid
-from datetime import datetime
-import glob  # Add this import
-
-MAX_TOKENS = 65000
-encoding = tiktoken.encoding_for_model("gpt-4")  # Substitute with DeepSeek-compatible model name if needed
-CHAT_HISTORY_DIR = "chat_history"
-os.makedirs(CHAT_HISTORY_DIR, exist_ok=True)
+import textwrap
 
 API_KEY = config("DEEPSEEK_API_KEY", default="")
 
@@ -24,31 +16,8 @@ DEFAULT_CONTEXT = "You are a helpful assistant. Provide clear and concise answer
 client = OpenAI(api_key=API_KEY, base_url="https://api.deepseek.com")
 
 DEFAULT_PROMPT_FILE = "default_prompt.json"
-MAX_FILE_CONTEXT_LENGTH = 65000
-
-def save_chat_session(chat_history):
-    session_id = str(uuid.uuid4())
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    filename = f"{CHAT_HISTORY_DIR}/{timestamp}_{session_id}.json"
-
-    with open(filename, 'w') as f:
-        json.dump({
-            "id": session_id,
-            "timestamp": timestamp,
-            "chat_history": chat_history,
-            "default_prompt": st.session_state.get("default_prompt", ""),
-            "file_context": st.session_state.get("file_context", [])
-        }, f)
-    return filename
-
-def load_chat_session(filename):
-    with open(filename, 'r') as f:
-        data = json.load(f)
-        return data
-
-def list_saved_chats():
-    files = sorted(glob.glob(f"{CHAT_HISTORY_DIR}/*.json"), reverse=True)
-    return files
+MAX_FILE_CONTEXT_LENGTH = 50000  # Leave room for conversation history
+CHUNK_SIZE = 10000  # For processing large files
 
 def save_default_prompt(prompt):
     with open(DEFAULT_PROMPT_FILE, 'w') as f:
@@ -60,45 +29,17 @@ def load_default_prompt():
             return json.load(f).get("prompt", "")
     return ""
 
-def truncate_to_token_limit(text, max_tokens):
-    tokens = encoding.encode(text)
-    if len(tokens) <= max_tokens:
-        return text
-    truncated = encoding.decode(tokens[:max_tokens])
-    return truncated + "\n...[TRUNCATED]"
-
 # Initialize session state variables
 if "chat_history" not in st.session_state:
     st.session_state["chat_history"] = []
-
+if "file_context" not in st.session_state:
+    st.session_state["file_context"] = ""
 if "default_prompt" not in st.session_state:
     st.session_state["default_prompt"] = load_default_prompt()
-
-if "file_context" not in st.session_state:
-    st.session_state["file_context"] = []
-
 if "temperature" not in st.session_state:
     st.session_state["temperature"] = 0
-
-# Initialize system content with default context
-system_content = DEFAULT_CONTEXT
-
-# Add default prompt if exists
-if st.session_state["default_prompt"]:
-    system_content += f"\n\nDefault Prompt:\n{st.session_state['default_prompt']}"
-
-# Add uploaded file content to system context if exists
-if st.session_state["file_context"]:
-    all_file_contexts = []
-    for file in st.session_state["file_context"]:
-        file_summary = f"File: {file['name']}\nContent:\n{file['content']}"
-        all_file_contexts.append(file_summary)
-    joined_file_context = "\n\n".join(all_file_contexts)
-
-    if len(joined_file_context) > MAX_FILE_CONTEXT_LENGTH:
-        joined_file_context = truncate_to_token_limit(joined_file_context, MAX_TOKENS)
-
-    system_content += f"\n\nUploaded Files Context:\n{joined_file_context}"
+if "current_file_index" not in st.session_state:
+    st.session_state["current_file_index"] = 0
 
 def call_deepseek_api(messages, streaming=True, temperature=None):
     try:
@@ -125,6 +66,33 @@ def read_pdf(file):
     except Exception as e:
         st.error(f"Error reading PDF: {e}")
         return ""
+
+def process_large_text(text, max_length):
+    """Process large text by splitting into chunks if needed"""
+    if len(text) <= max_length:
+        return text
+    
+    # Try to split at natural boundaries first
+    chunks = textwrap.wrap(text, width=max_length, break_long_words=False)
+    if len(chunks) == 1:
+        # If still too large, split by lines
+        lines = text.split('\n')
+        chunks = []
+        current_chunk = []
+        current_length = 0
+        
+        for line in lines:
+            if current_length + len(line) + 1 > max_length and current_chunk:
+                chunks.append('\n'.join(current_chunk))
+                current_chunk = []
+                current_length = 0
+            current_chunk.append(line)
+            current_length += len(line) + 1
+        
+        if current_chunk:
+            chunks.append('\n'.join(current_chunk))
+    
+    return chunks[0]  # Return first chunk for initial context
 
 def read_file(file):
     try:
@@ -163,6 +131,13 @@ st.markdown("""
         .auto-scroll {
             max-height: calc(100vh - 200px);
             overflow-y: auto;
+        }
+        
+        /* File navigation buttons */
+        .file-nav {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
         }
     </style>
 """, unsafe_allow_html=True)
@@ -237,16 +212,19 @@ with st.sidebar:
         for uploaded_file in uploaded_files:
             file_content = read_file(uploaded_file)
             if file_content:
+                processed_content = process_large_text(file_content, MAX_FILE_CONTEXT_LENGTH)
                 all_file_contents.append({
                     "name": uploaded_file.name,
-                    "content": file_content
+                    "content": processed_content,
+                    "full_content": file_content
                 })
 
         st.session_state["file_context"] = all_file_contents
+        st.session_state["current_file_index"] = 0
 
         st.success(f"Loaded {len(uploaded_files)} file(s)")
         if st.checkbox("Show file contents"):
-            for file in all_file_contents:
+            for idx, file in enumerate(all_file_contents):
                 st.subheader(file['name'])
                 st.text_area(f"Content - {file['name']}", file['content'], height=200)
     
@@ -254,46 +232,6 @@ with st.sidebar:
     if st.button("Clear Chat History"):
         st.session_state["chat_history"] = []
         st.rerun()
-
-    st.subheader("Chat History")
-
-    # Save current chat button
-    if st.button("💾 Save Current Chat"):
-        if st.session_state["chat_history"]:
-            filename = save_chat_session(st.session_state["chat_history"])
-            st.success(f"Chat saved as {os.path.basename(filename)}")
-        else:
-            st.warning("No chat history to save")
-
-    # List of saved chats
-    saved_chats = list_saved_chats()
-    if saved_chats:
-        st.write("Saved Chats:")
-        selected_chat = st.selectbox(
-            "Select a chat to load",
-            [os.path.basename(f) for f in saved_chats],
-            index=0,
-            key="chat_selector"
-        )
-
-        if st.button("📂 Load Selected Chat"):
-            selected_file = os.path.join(CHAT_HISTORY_DIR, selected_chat)
-            chat_data = load_chat_session(selected_file)
-
-            st.session_state["chat_history"] = chat_data["chat_history"]
-            st.session_state["default_prompt"] = chat_data["default_prompt"]
-            st.session_state["file_context"] = chat_data["file_context"]
-
-            st.success(f"Loaded chat: {selected_chat}")
-            st.rerun()
-
-        if st.button("🗑️ Delete Selected Chat"):
-            selected_file = os.path.join(CHAT_HISTORY_DIR, selected_chat)
-            os.remove(selected_file)
-            st.success(f"Deleted chat: {selected_chat}")
-            st.rerun()
-    else:
-        st.write("No saved chats yet")
 
 # Main chat area container with auto-scrolling
 with st.container():
@@ -313,6 +251,26 @@ with st.container():
             st.markdown(st.session_state["temp_response"])
     
     st.markdown('</div>', unsafe_allow_html=True)
+
+# File navigation if multiple files are uploaded
+if "file_context" in st.session_state and len(st.session_state["file_context"]) > 1:
+    st.markdown('<div class="file-nav">', unsafe_allow_html=True)
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Previous File"):
+            st.session_state["current_file_index"] = max(0, st.session_state["current_file_index"] - 1)
+            st.rerun()
+    with col2:
+        if st.button("Next File"):
+            st.session_state["current_file_index"] = min(
+                len(st.session_state["file_context"]) - 1,
+                st.session_state["current_file_index"] + 1
+            )
+            st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    current_file = st.session_state["file_context"][st.session_state["current_file_index"]]
+    st.info(f"Currently viewing: {current_file['name']}")
 
 # Fixed input at bottom
 st.markdown('<div class="fixed-bottom">', unsafe_allow_html=True)
@@ -344,24 +302,20 @@ if user_input:
         if st.session_state["default_prompt"]:
             system_content += f"\n\nDefault Prompt:\n{st.session_state['default_prompt']}"
         
-        # Add uploaded file content to system context
         if "file_context" in st.session_state and st.session_state["file_context"]:
-            all_file_contexts = []
-            for file in st.session_state["file_context"]:
-                file_summary = f"File: {file['name']}\nContent:\n{file['content']}"
-                all_file_contexts.append(file_summary)
-            joined_file_context = "\n\n".join(all_file_contexts)
+            current_file = st.session_state["file_context"][st.session_state["current_file_index"]]
+            file_context = f"File: {current_file['name']}\nContent:\n{current_file['content']}"
+            system_content += f"\n\nCurrent File Context:\n{file_context}"
 
-            # Truncate to token limit if needed
-            if len(joined_file_context) > MAX_FILE_CONTEXT_LENGTH:
-                joined_file_context = truncate_to_token_limit(joined_file_context, MAX_TOKENS)
-
-            system_content += f"\n\nUploaded Files Context:\n{joined_file_context}"
-
-        # Build message history
+        # Build message history - keep only recent messages to save context space
         messages = [{"role": "system", "content": system_content}]
-        for message in st.session_state["chat_history"]:
+        
+        # Add only the most recent messages to conserve context length
+        max_history_messages = 5  # Adjust based on your needs
+        recent_history = st.session_state["chat_history"][-max_history_messages:]
+        for message in recent_history:
             messages.append(message)
+        
         messages.append({"role": "user", "content": user_input})
 
         # Add user message to chat history immediately
