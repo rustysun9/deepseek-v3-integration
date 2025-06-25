@@ -20,7 +20,9 @@ MAX_API_TOKENS = 65536  # DeepSeek API hard limit
 CHUNK_SIZE = 32000
 MAX_FILE_CONTEXT_LENGTH = 60000  # Reduced to leave room for chat history
 # Ensure we have an absolute path for chat history
-CHAT_HISTORY_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "chat_history"))
+CHAT_HISTORY_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "chat_history")
+)
 MODELS = ["deepseek-chat", "deepseek-reasoner"]
 
 API_KEY = config("DEEPSEEK_API_KEY", default="")
@@ -65,11 +67,11 @@ def save_chat_session(chat_history, chat_name, chat_desc) -> str:
         if not chat_history or not isinstance(chat_history, list):
             st.sidebar.error(f"Invalid chat history: empty or invalid format")
             return ""
-        
+
         # Generate filename with timestamp for uniqueness
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
         session_id = str(uuid.uuid4())[:8]
-        
+
         # Create full path for the new chat file
         chat_dir_abs = os.path.abspath(CHAT_HISTORY_DIR)
         filename = os.path.join(chat_dir_abs, f"chat_{timestamp}_{session_id}.json")
@@ -94,19 +96,19 @@ def save_chat_session(chat_history, chat_name, chat_desc) -> str:
         if not os.path.exists(chat_dir_abs):
             st.sidebar.error(f"Failed to create directory: {chat_dir_abs}")
             return ""
-            
+
         # Write to temporary file first (safer)
         with open(temp_path, "w") as f:
             json.dump(data, f, indent=2)
-            
+
         # Verify temp file was created
         if not os.path.exists(temp_path):
             st.sidebar.error(f"Failed to create temporary file: {temp_path}")
             return ""
-            
+
         # Rename to final filename
         os.rename(temp_path, filename)
-        
+
         # Verify file was renamed successfully
         if os.path.exists(filename):
             # Refresh saved chats list immediately
@@ -127,7 +129,7 @@ def save_chat_modal():
     """Reusable modal for saving chats with name/description"""
     st.sidebar.markdown("### Save Chat")
     st.sidebar.caption("Please enter a name for your chat")
-    
+
     with st.sidebar.form(key="save_chat_form", clear_on_submit=True):
         chat_name = st.text_input(
             "Chat Name",
@@ -140,14 +142,14 @@ def save_chat_modal():
             help="Add a brief description to help identify this chat later",
         )
         submitted = st.form_submit_button("Save Chat")
-        
+
         # Validate form submission
         if submitted:
             if not chat_name:
                 st.sidebar.error("No chat name provided")
             else:
                 return chat_name, chat_desc
-    
+
     # If we get here, either the form wasn't submitted or validation failed
     return None, None
 
@@ -200,23 +202,23 @@ def list_saved_chats():
     try:
         # Use absolute path for better reliability
         chat_dir_abs = os.path.abspath(CHAT_HISTORY_DIR)
-        
+
         # Ensure directory exists
         if not os.path.exists(chat_dir_abs):
             os.makedirs(chat_dir_abs, exist_ok=True)
             return []
-            
+
         # Get all JSON files in the directory
         pattern = os.path.join(chat_dir_abs, "*.json")
-        
+
         # Check if directory is accessible
         if not os.access(chat_dir_abs, os.R_OK):
             st.sidebar.error(f"Cannot access chat history directory")
             return []
-            
+
         # Get all files matching pattern
         files = glob.glob(pattern)
-        
+
         # Check if directory exists and is readable
         try:
             # Verify each file is readable and valid
@@ -230,16 +232,20 @@ def list_saved_chats():
                         valid_files.append(file)
                     except Exception:
                         pass
-            
+
             # Update files to only include valid ones
             files = valid_files
-            
+
         except Exception:
             pass
-            
+
         # Sort by modification time (newest first)
-        return sorted(files, key=lambda f: os.path.getmtime(f) if os.path.exists(f) else 0, reverse=True)
-        
+        return sorted(
+            files,
+            key=lambda f: os.path.getmtime(f) if os.path.exists(f) else 0,
+            reverse=True,
+        )
+
     except Exception as e:
         st.sidebar.error(f"Error listing chats: {str(e)}")
         return []
@@ -296,14 +302,14 @@ def truncate_code(code: str, max_tokens: int) -> str:
     # Priority patterns (order matters)
     patterns = [
         (r'^\s*#\s*include\s+["<].+[>"]', 100),  # Includes (highest priority)
-        (r'^\s*#\s*define\s+\w+', 95),          # Macro definitions
-        (r'^\s*(class|struct)\s+\w+', 90),       # Class/struct definitions
-        (r'^\s*[\w\s]+\s*\w+\s*\([^)]*\)\s*{', 85),  # Function definitions
-        (r'^\s*typedef\s+\w+', 80),             # Typedefs
-        (r'^\s*enum\s+\w+', 75),                # Enums
-        (r'^\/\*\*?.+?\*\/', 70),               # Documentation comments
-        (r'^\/\/.+', 50),                       # Regular comments
-        (r'.+', 10)                             # Everything else
+        (r"^\s*#\s*define\s+\w+", 95),  # Macro definitions
+        (r"^\s*(class|struct)\s+\w+", 90),  # Class/struct definitions
+        (r"^\s*[\w\s]+\s*\w+\s*\([^)]*\)\s*{", 85),  # Function definitions
+        (r"^\s*typedef\s+\w+", 80),  # Typedefs
+        (r"^\s*enum\s+\w+", 75),  # Enums
+        (r"^\/\*\*?.+?\*\/", 70),  # Documentation comments
+        (r"^\/\/.+", 50),  # Regular comments
+        (r".+", 10),  # Everything else
     ]
 
     lines = code.split("\n")
@@ -395,35 +401,10 @@ def truncate_text(text: str, max_tokens: int) -> str:
 
     return truncated
 
-def get_default_prompt(file_extension):
-    prompt_map = {
-        '.c': 'Analyze this C code:',
-        '.cpp': 'Analyze this C++ code:',
-        '.h': 'Analyze this C/C++ header:',
-        '.ino': 'Analyze this Arduino sketch:',
-        '.py': 'Analyze this Python code:',
-        '.java': 'Analyze this Java code:',
-        '.js': 'Analyze this JavaScript code:',
-        '.ts': 'Analyze this TypeScript code:',
-        '.html': 'Analyze this HTML code:',
-        '.css': 'Analyze this CSS code:',
-        '.rb': 'Analyze this Ruby code:',
-        '.php': 'Analyze this PHP code:',
-        '.go': 'Analyze this Go code:',
-        '.rs': 'Analyze this Rust code:',
-        '.swift': 'Analyze this Swift code:',
-        '.kt': 'Analyze this Kotlin code:',
-        '.sh': 'Analyze this Shell script:',
-        '.sql': 'Analyze this SQL script:',
-        '.json': 'Analyze this JSON data:',
-        '.xml': 'Analyze this XML data:',
-        '.yaml': 'Analyze this YAML configuration:',
-        '.md': 'Analyze this Markdown document:',
-    }
-    return prompt_map.get(file_extension, 'Analyze this code:')
 
 def get_file_extension(filename):
     return os.path.splitext(filename)[1].lower()
+
 
 def read_large_file(file) -> str:
     """Optimized file reader with better code detection and chunking."""
@@ -448,7 +429,7 @@ def read_large_file(file) -> str:
         "hpp": "cpp-header",
         "cxx": "cpp",
         "cc": "cpp",
-        "hxx": "cpp-header"
+        "hxx": "cpp-header",
     }
 
     ext = file.name.split(".")[-1].lower()
@@ -459,7 +440,7 @@ def read_large_file(file) -> str:
             # Read header files more aggressively
             chunk_size = CHUNK_SIZE * 20  # Even larger chunks for headers
             is_code = True
-    
+
         if file.type == "application/pdf":
             doc = fitz.open(stream=io.BytesIO(file.read()), filetype="pdf")
             return "".join(page.get_text() for page in doc)
@@ -524,7 +505,9 @@ def calculate_context_usage(messages):
 
 def update_system_message():
     """Enhanced for C/C++ projects"""
-    system_content = DEFAULT_CONTEXT + "\n\nYou are assisting with a C/C++/Arduino project."
+    system_content = (
+        DEFAULT_CONTEXT + "\n\nYou are assisting with a C/C++/Arduino project."
+    )
 
     if st.session_state["file_context"]:
         grouped_files = group_related_files(st.session_state["file_context"])
@@ -533,20 +516,21 @@ def update_system_message():
         # Special handling for .h/.ino pairs
         for group, files in grouped_files.items():
             # Sort files to show headers first
-            files.sort(key=lambda x: x['name'].endswith('.h'), reverse=True)
+            files.sort(key=lambda x: x["name"].endswith(".h"), reverse=True)
 
-            combined = "\n\n".join([
-                f"// File: {f['name']}\n{f['content']}" 
-                for f in files
-            ])
+            combined = "\n\n".join(
+                [f"// File: {f['name']}\n{f['content']}" for f in files]
+            )
 
             # Allocate more tokens to implementation files
-            is_implementation = any(f['name'].endswith(('.ino','.c','.cpp')) 
-                                for f in files)
+            is_implementation = any(
+                f["name"].endswith((".ino", ".c", ".cpp")) for f in files
+            )
             max_tokens = (MAX_FILE_CONTEXT_LENGTH // len(grouped_files)) * (
-                2 if is_implementation else 1)
+                2 if is_implementation else 1
+            )
 
-            truncated = smart_truncate(combined, max_tokens, is_code = True)
+            truncated = smart_truncate(combined, max_tokens, is_code=True)
             file_contexts.append(f"// Project: {group}\n{truncated}")
 
 
@@ -576,16 +560,16 @@ def init_session_state():
 
     if "temperature" not in st.session_state:
         st.session_state["temperature"] = 0.1  # Default temperature for coding
-        
+
     if "refresh_chats_flag" not in st.session_state:
         st.session_state["refresh_chats_flag"] = True
-        
+
     if "save_chat_clicked" not in st.session_state:
         st.session_state["save_chat_clicked"] = False
-        
+
     if "save_chat_bottom_clicked" not in st.session_state:
         st.session_state["save_chat_bottom_clicked"] = False
-        
+
     if "chat_save_path" not in st.session_state:
         st.session_state["chat_save_path"] = None
 
@@ -595,6 +579,7 @@ def init_session_state():
             st.session_state["system_message"] += (
                 f"\n\nDefault Prompt:\n{st.session_state['default_prompt']}"
             )
+
 
 # Initialize all session state values
 init_session_state()
@@ -617,21 +602,24 @@ with st.sidebar:
         # Hold button state in session to prevent issues with st.button getting reset on interaction
         if "save_chat_clicked" not in st.session_state:
             st.session_state.save_chat_clicked = False
-            
-        if st.button("💾 Save Chat", key="save_chat_top", help="Save current chat") or st.session_state.save_chat_clicked:
+
+        if (
+            st.button("💾 Save Chat", key="save_chat_top", help="Save current chat")
+            or st.session_state.save_chat_clicked
+        ):
             if not st.session_state["chat_history"]:
                 st.error("No chat messages to save!")
             else:
                 # Set flag to maintain button "clicked" state during form display
                 st.session_state.save_chat_clicked = True
-                
+
                 # Make save form more visible
                 st.sidebar.markdown("---")
                 st.sidebar.markdown("## 📝 Save Your Chat")
-                
+
                 # Get chat name and description from modal
                 chat_name, chat_desc = save_chat_modal()
-                
+
                 if chat_name:
                     # If we got a name, save was confirmed
                     with st.spinner("Saving chat..."):
@@ -650,10 +638,10 @@ with st.sidebar:
     # Initialize refresh flag if not present
     if "refresh_chats_flag" not in st.session_state:
         st.session_state["refresh_chats_flag"] = True
-        
+
     # Get all saved chats with forced refresh
     saved_chats = list_saved_chats()
-    
+
     # Enhanced visibility for chat history section with better styling
     if not saved_chats:
         st.warning("⚠️ No saved chats found. Save a chat to see it here.")
@@ -661,32 +649,36 @@ with st.sidebar:
         # Load metadata for display with error handling
         chat_options = []
         chat_details = {}
-        
+
         for i, chat_file in enumerate(saved_chats):
             try:
                 with open(chat_file, "r") as f:
                     data = json.load(f)
-                    
+
                 # Extract metadata
                 name = data.get("metadata", {}).get("name", os.path.basename(chat_file))
                 desc = data.get("metadata", {}).get("description", "")
                 created_at = data.get("metadata", {}).get("created_at", "")
-                
+
                 # Format date for display if available
                 if created_at:
                     try:
-                        date_display = datetime.strptime(created_at[:8], "%Y%m%d").strftime("%b %d, %Y")
+                        date_display = datetime.strptime(
+                            created_at[:8], "%Y%m%d"
+                        ).strftime("%b %d, %Y")
                     except Exception:
-                        date_display = created_at[:8] if len(created_at) >= 8 else created_at
+                        date_display = (
+                            created_at[:8] if len(created_at) >= 8 else created_at
+                        )
                 else:
                     date_display = "Unknown date"
-                    
+
                 # Add date to name for better identification
                 display_name = f"{name} ({date_display})"
-                
+
                 # Get message count
                 message_count = len(data.get("chat_history", []))
-                
+
                 # Store details
                 chat_options.append(display_name)
                 chat_details[display_name] = {
@@ -696,53 +688,67 @@ with st.sidebar:
                     "original_name": name,
                     "message_count": message_count,
                 }
-                
+
             except Exception as e:
                 file_name = os.path.basename(chat_file)
                 display_name = f"{file_name} (Error loading)"
                 chat_options.append(display_name)
                 chat_details[display_name] = {
-                    "filename": chat_file, 
+                    "filename": chat_file,
                     "description": f"Error: {str(e)}",
                     "date": "",
                     "original_name": file_name,
                     "message_count": 0,
                 }
-        
+
         # Add a manual refresh button
         if st.button("🔄 Refresh Chat List", key="refresh_chat_list_btn"):
             st.session_state["refresh_chats_flag"] = True
             st.rerun()
-        
+
         if chat_options:
             # Always show saved chats (no expander)
             st.markdown("### Select a saved chat")
             selected_name = st.selectbox(
-                "Available chats:", 
-                chat_options, 
+                "Available chats:",
+                chat_options,
                 key="saved_chat_selector",
-                format_func=lambda x: f"{x} ({chat_details[x].get('message_count', 0)} messages)" if x in chat_details else x
+                format_func=lambda x: f"{x} ({chat_details[x].get('message_count', 0)} messages)"
+                if x in chat_details
+                else x,
             )
-            
+
             if selected_name:
                 # Show description and metadata if available
                 with st.container():
                     if chat_details[selected_name]["description"]:
                         st.info(chat_details[selected_name]["description"])
-                    
+
                     # Show message count
                     if chat_details[selected_name].get("message_count", 0) > 0:
-                        st.caption(f"Contains {chat_details[selected_name]['message_count']} messages")
-                    
+                        st.caption(
+                            f"Contains {chat_details[selected_name]['message_count']} messages"
+                        )
+
                     # Show file details
-                    st.caption(f"File: {os.path.basename(chat_details[selected_name]['filename'])}")
-                    
+                    st.caption(
+                        f"File: {os.path.basename(chat_details[selected_name]['filename'])}"
+                    )
+
                     col1, col2 = st.columns(2)
                     with col1:
-                        if st.button("📂 Load Chat", key="load_chat_btn", use_container_width=True):
+                        if st.button(
+                            "📂 Load Chat",
+                            key="load_chat_btn",
+                            use_container_width=True,
+                        ):
                             try:
-                                with st.spinner(f"Loading {chat_details[selected_name]['original_name']}..."):
-                                    data = load_chat_session(chat_details[selected_name]["filename"])
+                                with st.spinner(
+                                    f"Loading {chat_details[selected_name]['original_name']}..."
+                                ):
+                                    data = load_chat_session(
+                                        chat_details[selected_name]["filename"]
+                                    )
                                     st.session_state.update(
                                         {
                                             "chat_history": data["chat_history"],
@@ -751,16 +757,22 @@ with st.sidebar:
                                             "system_message": data["system_message"],
                                         }
                                     )
-                                    st.success(f"Loaded: {chat_details[selected_name]['original_name']}")
+                                    st.success(
+                                        f"Loaded: {chat_details[selected_name]['original_name']}"
+                                    )
                                     st.rerun()
                             except Exception as e:
                                 st.error(f"Failed to load chat: {e}")
                     with col2:
-                        if st.button("🗑️ Delete", key="delete_chat_btn", use_container_width=True):
+                        if st.button(
+                            "🗑️ Delete", key="delete_chat_btn", use_container_width=True
+                        ):
                             try:
                                 full_path = chat_details[selected_name]["filename"]
                                 os.remove(full_path)
-                                st.success(f"Deleted {chat_details[selected_name]['original_name']}")
+                                st.success(
+                                    f"Deleted {chat_details[selected_name]['original_name']}"
+                                )
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Error deleting file: {e}")
@@ -798,25 +810,25 @@ with st.sidebar:
             for file in uploaded_files
         )
         project_type_map = {
-            '.ino': 'arduino',
-            '.py': 'python',
-            '.js': 'javascript',
-            '.java': 'java',
-            '.c': 'c',
-            '.cpp': 'c++',
-            '.h': 'c/c++ header',
-            '.sh': 'shell script',
-            '.php': 'php',
-            '.rb': 'ruby',
-            '.go': 'go',
-            '.rs': 'rust',
-            '.ts': 'typescript',
-            '.html': 'html',
-            '.css': 'css',
-            '.md': 'markdown',
-            '.json': 'json',
-            '.xml': 'xml',
-            '.yaml': 'yaml',
+            ".ino": "arduino",
+            ".py": "python",
+            ".js": "javascript",
+            ".java": "java",
+            ".c": "c",
+            ".cpp": "c++",
+            ".h": "c/c++ header",
+            ".sh": "shell script",
+            ".php": "php",
+            ".rb": "ruby",
+            ".go": "go",
+            ".rs": "rust",
+            ".ts": "typescript",
+            ".html": "html",
+            ".css": "css",
+            ".md": "markdown",
+            ".json": "json",
+            ".xml": "xml",
+            ".yaml": "yaml",
         }
 
         # Determine the most relevant project type
@@ -828,7 +840,7 @@ with st.sidebar:
 
         # Generate the dynamic prompt
         extensions_list = ", ".join(sorted(file_extensions))
-        return f"This is a \"{project_type}\" project. Uploaded project files are {extensions_list} files."
+        return f'This is a "{project_type}" project. Uploaded project files are {extensions_list} files.'
 
     # Update the dynamic default prompt generation in the file upload section
     if uploaded_files:
@@ -1014,3 +1026,4 @@ if __name__ == "__main__":
         print(f"Dynamic default prompt applied: {dynamic_prompt}")
     else:
         print("No files uploaded. Default prompt not generated.")
+
