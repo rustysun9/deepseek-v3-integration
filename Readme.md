@@ -35,7 +35,7 @@ A **Streamlit-based web application** that allows users to interact with documen
 
 1. Clone the repository:
    ```bash
-   git clone git@github.com:ragasimger/deepseek-v3-integration.git
+   git clone git@github.com:rustysun9/deepseek-v3-integration.git
 
 2. Install dependencies:
     ```bash
