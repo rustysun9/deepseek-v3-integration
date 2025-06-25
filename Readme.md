@@ -31,7 +31,6 @@ A **Streamlit-based web application** that allows users to interact with documen
 
 ### Chat History Management
 - Save and load chat sessions with metadata (name, description, and timestamps)
-- View saved chats grouped by date (Today, Yesterday, Last 7 Days, Older)
 - Delete saved chats directly from the interface
 
 ### Task-Specific Temperature Control
