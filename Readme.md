@@ -8,16 +8,48 @@ A **Streamlit-based web application** that allows users to interact with documen
 
 ---
 
-## Key Features
+# Key Features
 
-- **File Upload**: Supports PDF, DOCX, and TXT files for context-based queries.
-- **Streaming Responses**: Real-time, incremental responses for a smooth user experience.
-- **Context-Aware Answers**: Combines default context, user prompts, and file content for accurate responses.
-- **Customizable Settings**:
-  - Set **default prompts** for system behavior.
-  - Adjust **temperature** for response creativity (low for accuracy, high for creativity).
-- **Chat History**: Displays conversation history grouped by date (Today, Yesterday, 7 Days, Older).
-- **Task-Specific Temperature**: Automatically adjusts temperature based on task type (e.g., coding, general questions, creative tasks).
+# File Upload:
+- Supports a wide range of file types, including PDF, DOCX, TXT, Python (.py), C/C++ (.c, .cpp, .h), Arduino (.ino), JavaScript (.js), HTML, CSS, JSON, YAML, and more.
+- Uploaded files are processed for context-based queries.
+
+# Dynamic Default Prompt Generation:
+- Automatically generates a default prompt based on the uploaded files' types and content.
+- Ensures accurate and relevant responses.
+
+# Streaming Responses:
+- Provides real-time, incremental responses for a smooth and interactive user experience.
+
+# Context-Aware Answers:
+- Combines default context, user prompts, and file content to deliver precise and contextually relevant answers.
+
+# Customizable Settings:
+- Set default prompts to define system behavior.
+- Adjust temperature for response creativity (low for accuracy, high for creativity).
+- Select task-specific models (e.g., coding, reasoning, or general chat).
+
+# Chat History Management:
+- Save and load chat sessions with metadata (name, description, and timestamps).
+- View saved chats grouped by date (Today, Yesterday, Last 7 Days, Older).
+- Delete saved chats directly from the interface.
+
+# Task-Specific Temperature Control:
+- Automatically adjusts temperature ranges based on the selected task type (e.g., coding/math, general questions, data analysis, or creative writing).
+
+# Token Usage Management:
+- Displays real-time token usage progress to ensure compliance with API limits.
+- Implements token truncation strategies to prioritize important context and maintain efficiency.
+
+# Advanced File Context Handling:
+- Groups related files (e.g., .ino with corresponding .h files) for better project context.
+- Truncates large files intelligently while preserving structure and relevance.
+
+# Cache Efficiency Display:
+- Shows cache hit/miss statistics to optimize API usage and improve performance.
+
+# User Balance Information:
+- Displays account balance details, including total balance, granted balance, and topped-up balance.
 
 ---
 
