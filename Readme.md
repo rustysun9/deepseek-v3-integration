@@ -1,4 +1,4 @@
-# DeepSeek Chat Interface V3.1
+# DeepSeek Chat Interface updated to DeepSeek-V3.1
 
 ![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=for-the-badge&logo=Streamlit&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
@@ -7,7 +7,8 @@
 A **Streamlit-based web application** that provides advanced chat capabilities using **DeepSeek's latest models** including the new **deepseek-reasoner** with chain-of-thought reasoning. Supports multi-file context, intelligent token management, and professional-grade document processing.
 
 ---
-
+> **Fork Note**: This project originated from [ragasimger/deepseek-v3-integration](https://github.com/ragasimger/deepseek-v3-integration) but has been significantly enhanced with new features and improvements.
+---
 ## 🚀 Key Features (V3.1)
 
 ### 🤖 Dual Model Support
