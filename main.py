@@ -1,5 +1,5 @@
 import io
-import chardet
+import charset_normalizer
 import fitz
 import streamlit as st
 from decouple import config
@@ -11,17 +11,22 @@ import uuid
 from datetime import datetime
 import glob
 import re
-from typing import List, Dict, Union
+from typing import List, Dict, Union, Optional
 
 # Constants with API-enforced limits
 CHAT_NAME_MAX_LENGTH = 50
 CHAT_DESC_MAX_LENGTH = 100
-MAX_API_TOKENS = 65536  # DeepSeek API hard limit
+MAX_API_TOKENS = 131072  # 128K tokens (128 * 1024 = 131072)
 CHUNK_SIZE = 32000
-MAX_FILE_CONTEXT_LENGTH = 60000  # Reduced to leave room for chat history
+MAX_FILE_CONTEXT_LENGTH = 100000  # Reduced to leave room for chat history
 # Ensure we have an absolute path for chat history
-CHAT_HISTORY_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "chat_history"))
-MODELS = ["deepseek-chat", "deepseek-coder", "deepseek-reasoner"]
+CHAT_HISTORY_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "chat_history")
+)
+# Updated models for V3.1
+MODELS = ["deepseek-chat", "deepseek-reasoner"]
+MAX_OUTPUT_TOKENS_CHAT = 8192  # 8K maximum for deepseek-chat
+MAX_OUTPUT_TOKENS_REASONER = 65536  # 64K maximum for deepseek-reasoner
 
 API_KEY = config("DEEPSEEK_API_KEY", default="")
 encoding = tiktoken.encoding_for_model("gpt-4")
@@ -53,7 +58,8 @@ def reset_chat_state():
             "chat_history": [],
             "file_context": [],
             "system_message": DEFAULT_CONTEXT,
-            "messages": [],  # Add this if you're using a separate messages list
+            "messages": [],
+            "reasoning_content": None,  # New for reasoning model
         }
     )
 
@@ -61,21 +67,17 @@ def reset_chat_state():
 def save_chat_session(chat_history, chat_name, chat_desc) -> str:
     """Save current chat session with provided name/description"""
     try:
-        # Check if input is valid
         if not chat_history or not isinstance(chat_history, list):
             st.sidebar.error(f"Invalid chat history: empty or invalid format")
             return ""
-        
-        # Generate filename with timestamp for uniqueness
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
         session_id = str(uuid.uuid4())[:8]
-        
-        # Create full path for the new chat file
+
         chat_dir_abs = os.path.abspath(CHAT_HISTORY_DIR)
         filename = os.path.join(chat_dir_abs, f"chat_{timestamp}_{session_id}.json")
         temp_path = f"{filename}.tmp"
 
-        # Prepare data structure for saving
         data = {
             "metadata": {
                 "name": chat_name[:CHAT_NAME_MAX_LENGTH],
@@ -87,29 +89,24 @@ def save_chat_session(chat_history, chat_name, chat_desc) -> str:
             "default_prompt": st.session_state.get("default_prompt", ""),
             "file_context": st.session_state.get("file_context", []),
             "system_message": st.session_state.get("system_message", DEFAULT_CONTEXT),
+            "reasoning_content": st.session_state.get("reasoning_content", None),  # Save reasoning
         }
 
-        # Make sure chat_history directory exists
         os.makedirs(chat_dir_abs, exist_ok=True)
         if not os.path.exists(chat_dir_abs):
             st.sidebar.error(f"Failed to create directory: {chat_dir_abs}")
             return ""
-            
-        # Write to temporary file first (safer)
+
         with open(temp_path, "w") as f:
             json.dump(data, f, indent=2)
-            
-        # Verify temp file was created
+
         if not os.path.exists(temp_path):
             st.sidebar.error(f"Failed to create temporary file: {temp_path}")
             return ""
-            
-        # Rename to final filename
+
         os.rename(temp_path, filename)
-        
-        # Verify file was renamed successfully
+
         if os.path.exists(filename):
-            # Refresh saved chats list immediately
             st.session_state["refresh_chats_flag"] = True
             return filename
         else:
@@ -127,7 +124,7 @@ def save_chat_modal():
     """Reusable modal for saving chats with name/description"""
     st.sidebar.markdown("### Save Chat")
     st.sidebar.caption("Please enter a name for your chat")
-    
+
     with st.sidebar.form(key="save_chat_form", clear_on_submit=True):
         chat_name = st.text_input(
             "Chat Name",
@@ -140,37 +137,68 @@ def save_chat_modal():
             help="Add a brief description to help identify this chat later",
         )
         submitted = st.form_submit_button("Save Chat")
-        
-        # Validate form submission
+
         if submitted:
             if not chat_name:
                 st.sidebar.error("No chat name provided")
             else:
                 return chat_name, chat_desc
-    
-    # If we get here, either the form wasn't submitted or validation failed
+
     return None, None
 
+def validate_prompt(prompt_text: str) -> bool:
+    """Validate prompt content meets basic requirements"""
+    if not isinstance(prompt_text, str):
+        return False
+    if len(prompt_text.strip()) == 0:
+        return False
+    if len(prompt_text) > 10000:  # Reasonable upper limit
+        return False
+    return True
 
-def load_default_prompt():
-    """Load default prompt from file if exists, otherwise return empty string"""
+def load_default_prompt() -> str:
+    """Load default prompt from file"""
     try:
-        if os.path.exists(DEFAULT_PROMPT_FILE):
-            with open(DEFAULT_PROMPT_FILE, "r") as f:
-                return f.read()
+        file_path = os.path.join(os.path.dirname(__file__), DEFAULT_PROMPT_FILE)
+
+        if not os.path.exists(file_path):
+            return ""
+
+        with open(file_path, "r", encoding='utf-8') as f:
+            content = f.read().strip()
+
+        # Always expect JSON format for consistency
+        try:
+            data = json.loads(content)
+            return data.get("prompt", "")
+        except json.JSONDecodeError:
+            st.error("Default prompt file must be valid JSON")
+            return ""
+
     except Exception as e:
         st.error(f"Error loading default prompt: {e}")
-    return ""
+        return ""
 
 
 def save_default_prompt(prompt_text):
-    """Save default prompt to file"""
+    """Save default prompt with validation"""
+    if not validate_prompt(prompt_text):
+        st.error("Invalid prompt content")
+        return False
+
     try:
-        with open(DEFAULT_PROMPT_FILE, "w") as f:
-            f.write(prompt_text)
+        file_path = os.path.join(os.path.dirname(__file__), DEFAULT_PROMPT_FILE)
+
+        # Save as JSON for consistency
+        data = {"prompt": prompt_text, "updated": datetime.now().isoformat()}
+
+        with open(file_path, "w", encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+        return True
     except Exception as e:
         st.error(f"Error saving default prompt: {e}")
-
+        return False
 
 def load_chat_session(filename):
     with open(filename, "r") as f:
@@ -188,6 +216,7 @@ def load_chat_session(filename):
             "default_prompt": data.get("default_prompt", ""),
             "file_context": data.get("file_context", []),
             "system_message": data.get("system_message", DEFAULT_CONTEXT),
+            "reasoning_content": data.get("reasoning_content", None),  # Load reasoning
             "id": data.get("id", str(uuid.uuid4())),
             "timestamp": data.get(
                 "timestamp", datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -198,48 +227,38 @@ def load_chat_session(filename):
 def list_saved_chats():
     """List all saved chat sessions"""
     try:
-        # Use absolute path for better reliability
         chat_dir_abs = os.path.abspath(CHAT_HISTORY_DIR)
-        
-        # Ensure directory exists
+
         if not os.path.exists(chat_dir_abs):
             os.makedirs(chat_dir_abs, exist_ok=True)
             return []
-            
-        # Get all JSON files in the directory
+
         pattern = os.path.join(chat_dir_abs, "*.json")
-        
-        # Check if directory is accessible
+
         if not os.access(chat_dir_abs, os.R_OK):
             st.sidebar.error(f"Cannot access chat history directory")
             return []
-            
-        # Get all files matching pattern
+
         files = glob.glob(pattern)
-        
-        # Check if directory exists and is readable
-        try:
-            # Verify each file is readable and valid
-            valid_files = []
-            for file in files:
-                if os.path.isfile(file) and os.access(file, os.R_OK):
-                    try:
-                        # Try to read the first few bytes to verify file access
-                        with open(file, "rb") as f:
-                            f.read(10)
-                        valid_files.append(file)
-                    except Exception:
-                        pass
-            
-            # Update files to only include valid ones
-            files = valid_files
-            
-        except Exception:
-            pass
-            
-        # Sort by modification time (newest first)
-        return sorted(files, key=lambda f: os.path.getmtime(f) if os.path.exists(f) else 0, reverse=True)
-        
+
+        valid_files = []
+        for file in files:
+            if os.path.isfile(file) and os.access(file, os.R_OK):
+                try:
+                    with open(file, "rb") as f:
+                        f.read(10)
+                    valid_files.append(file)
+                except Exception:
+                    pass
+
+        files = valid_files
+
+        return sorted(
+            files,
+            key=lambda f: os.path.getmtime(f) if os.path.exists(f) else 0,
+            reverse=True,
+        )
+
     except Exception as e:
         st.sidebar.error(f"Error listing chats: {str(e)}")
         return []
@@ -252,26 +271,22 @@ def enforce_token_limit(messages):
     if total_tokens <= MAX_API_TOKENS:
         return messages
 
-    # Prioritize keeping system message and recent chat history
     system_message = messages[0]
     chat_history = messages[1:]
 
-    # Calculate how many tokens we can allocate to chat history
     system_tokens = calculate_context_usage([system_message])
     remaining_tokens = MAX_API_TOKENS - system_tokens
 
-    # Keep trimming chat history until we're under the limit
     while True:
-        chat_history = chat_history[-20:]  # Keep last 20 messages
+        chat_history = chat_history[-20:]
         history_tokens = calculate_context_usage(chat_history)
 
         if system_tokens + history_tokens <= MAX_API_TOKENS:
             break
 
-        # If still over, truncate each message content
         for msg in chat_history:
             current_tokens = len(encoding.encode(msg["content"]))
-            if current_tokens > 1000:  # Only truncate long messages
+            if current_tokens > 1000:
                 msg["content"] = smart_truncate(msg["content"], current_tokens // 2)
 
     return [system_message] + chat_history
@@ -284,29 +299,25 @@ def smart_truncate(text: str, max_tokens: int, is_code: bool = False) -> str:
         return text
 
     if is_code:
-        # Code-specific optimized truncation
         return truncate_code(text, max_tokens)
 
-    # Text truncation with improved boundary detection
     return truncate_text(text, max_tokens)
 
 
 def truncate_code(code: str, max_tokens: int) -> str:
     """Specialized code truncation that preserves structure."""
-    # Priority patterns (order matters)
     patterns = [
-        (r"^(import|from)\s", 100),  # Imports (high priority)
-        (r"^(class|def)\s", 90),  # Class/function definitions
-        (r"^@", 80),  # Decorators
-        (r"^#\s*[A-Z]", 70),  # Capitalized comments (likely important)
-        (r"^#", 50),  # Other comments
-        (r".+", 10),  # Everything else
+        (r"^(import|from)\s", 100),
+        (r"^(class|def)\s", 90),
+        (r"^@", 80),
+        (r"^#\s*[A-Z]", 70),
+        (r"^#", 50),
+        (r".+", 10),
     ]
 
     lines = code.split("\n")
     scored_lines = []
 
-    # Score each line based on importance patterns
     for line in lines:
         score = 0
         for pattern, pattern_score in patterns:
@@ -315,10 +326,8 @@ def truncate_code(code: str, max_tokens: int) -> str:
                 break
         scored_lines.append((score, line))
 
-    # Sort by score (descending) but keep original order for equal scores
     scored_lines.sort(key=lambda x: (-x[0], lines.index(x[1])))
 
-    # Build output until we hit token limit
     output = []
     current_tokens = 0
     for score, line in scored_lines:
@@ -328,8 +337,7 @@ def truncate_code(code: str, max_tokens: int) -> str:
         output.append(line)
         current_tokens += line_tokens
 
-    # If we have room, add back some context around high-score lines
-    if current_tokens < max_tokens * 0.8:  # If we're using less than 80%
+    if current_tokens < max_tokens * 0.9:
         for line in lines:
             if line not in output:
                 line_tokens = len(encoding.encode(line))
@@ -355,12 +363,10 @@ def truncate_text(text: str, max_tokens: int) -> str:
     if len(tokens) <= max_tokens:
         return text
 
-    # Try to find a good paragraph break near the middle
     mid_point = max_tokens // 2
     paragraphs = text.split("\n\n")
 
     if len(paragraphs) > 1:
-        # Find the paragraph that contains the mid point
         current_len = 0
         split_index = 0
         for i, para in enumerate(paragraphs):
@@ -370,15 +376,13 @@ def truncate_text(text: str, max_tokens: int) -> str:
                 break
             current_len += para_tokens
 
-        # Build output from first half and last half paragraphs
         first_half = "\n\n".join(paragraphs[:split_index])
         second_half = "\n\n".join(paragraphs[split_index:])
 
-        # Calculate how much we can take from each half
         first_tokens = len(encoding.encode(first_half))
         remaining = max(0, max_tokens - first_tokens)
 
-        if remaining > 100:  # Only include second half if we have significant space
+        if remaining > 100:
             second_tokens = len(encoding.encode(second_half))
             if second_tokens > remaining:
                 second_half = encoding.decode(encoding.encode(second_half)[:remaining])
@@ -387,7 +391,6 @@ def truncate_text(text: str, max_tokens: int) -> str:
         else:
             truncated = first_half
     else:
-        # Fallback to simple truncation
         truncated = encoding.decode(tokens[:max_tokens])
 
     return truncated
@@ -395,7 +398,7 @@ def truncate_text(text: str, max_tokens: int) -> str:
 
 def read_large_file(file) -> str:
     """Optimized file reader with better code detection and chunking."""
-    # Enhanced code detection
+    # Updated code_extensions with new file types
     code_extensions = {
         "py": "python",
         "js": "javascript",
@@ -412,6 +415,14 @@ def read_large_file(file) -> str:
         "md": "markdown",
         "html": "html",
         "css": "css",
+        "mk": "makefile",          # Makefiles
+        "xml": "xml",              # XML files
+        "cfg": "ini",              # Configuration files
+        "json": "json",            # JSON files
+        "service": "ini",          # Systemd service files
+        "nmconnection": "ini",     # NetworkManager connection files
+        "j2": "jinja2",            # Jinja2 templates
+        "conf": "apache",          # Apache/configuration files
     }
 
     ext = file.name.split(".")[-1].lower()
@@ -422,17 +433,17 @@ def read_large_file(file) -> str:
             doc = fitz.open(stream=io.BytesIO(file.read()), filetype="pdf")
             return "".join(page.get_text() for page in doc)
 
-        # Optimized reading for text/code files
         content = []
         file.seek(0)
 
-        # Read first 1KB to detect encoding
+        # Replace chardet with charset_normalizer
         sample = file.read(1024)
         file.seek(0)
-        encoding_info = chardet.detect(sample)
-        encoding_type = encoding_info["encoding"] or "utf-8"
 
-        # Read in optimized chunks (larger for code, smaller for text)
+        # Use charset_normalizer instead of chardet
+        detection_result = charset_normalizer.detect(sample)
+        encoding_type = detection_result.get('encoding', 'utf-8') or 'utf-8'
+
         chunk_size = CHUNK_SIZE * (10 if is_code else 1)
 
         while True:
@@ -452,10 +463,14 @@ def read_large_file(file) -> str:
 def get_user_balance():
     """Fetch user balance from DeepSeek API"""
     try:
+        if not API_KEY:
+            st.sidebar.warning("API key not configured")
+            return None
+
         response = client._client.get(
             "https://api.deepseek.com/user/balance",
             headers={"Authorization": f"Bearer {API_KEY}"},
-            timeout=10,  # Add timeout
+            timeout=10,
         )
         response.raise_for_status()
         data = response.json()
@@ -464,15 +479,10 @@ def get_user_balance():
             st.sidebar.warning("Balance information not available")
             return None
 
-        return data.get("balance_infos", [{}])[0]  # Return first balance info
+        return data.get("balance_infos", [{}])[0]
     except Exception as e:
         st.sidebar.error(f"Failed to fetch balance: {e}")
         return None
-
-
-# Initialize balance on first load
-if "balance_info" not in st.session_state:
-    st.session_state.balance_info = get_user_balance()
 
 
 def calculate_context_usage(messages):
@@ -481,68 +491,65 @@ def calculate_context_usage(messages):
 
 
 def update_system_message():
-    """Update system message with current context"""
-    system_content = DEFAULT_CONTEXT
+    """Build system message from components"""
+    components = [DEFAULT_CONTEXT]
 
+    # Add default prompt if exists
     if st.session_state["default_prompt"]:
-        system_content += f"\n\nDefault Prompt:\n{st.session_state['default_prompt']}"
+        components.append(f"Additional Instructions:\n{st.session_state['default_prompt']}")
 
+    # Add file context if exists
     if st.session_state["file_context"]:
-        file_contexts = []
+        file_section = ["Uploaded Files:"]
         for file in st.session_state["file_context"]:
-            truncated = smart_truncate(
-                file["content"],
-                MAX_FILE_CONTEXT_LENGTH // len(st.session_state["file_context"]),
-            )
-            file_contexts.append(f"File: {file['name']}\nContent:\n{truncated}")
+            truncated = smart_truncate(file["content"], MAX_FILE_CONTEXT_LENGTH // 3)
+            file_section.append(f"File: {file['name']}\nContent:\n{truncated}")
+        components.append("\n".join(file_section))
 
-        system_content += f"\n\nUploaded Files Context:\n" + "\n\n".join(file_contexts)
-
+    # Combine and truncate
     st.session_state["system_message"] = smart_truncate(
-        system_content, MAX_FILE_CONTEXT_LENGTH
+        "\n\n".join(components), 
+        MAX_FILE_CONTEXT_LENGTH
     )
 
 
-# Function to initialize all session state keys
 def init_session_state():
-    """Initialize all session state keys with default values"""
-    if "chat_history" not in st.session_state:
-        st.session_state["chat_history"] = []
+    """Initialize all session state keys with proper order"""
+    # Load default prompt FIRST
+    default_prompt_content = load_default_prompt()
 
-    if "default_prompt" not in st.session_state:
-        st.session_state["default_prompt"] = load_default_prompt()
+    # Initialize ALL session state defaults in one go
+    defaults = {
+        "chat_history": [],
+        "default_prompt": default_prompt_content,
+        "file_context": [],
+        "temperature": 0.1,
+        "refresh_chats_flag": True,
+        "save_chat_clicked": False,
+        "save_chat_bottom_clicked": False,
+        "chat_save_path": None,
+        "balance_info": None,
+        "reasoning_content": None,
+        "model_select": "deepseek-chat",
+        "cache_metrics": {"hit": 0, "miss": 0, "efficiency": 0.0}
+    }
 
-    if "file_context" not in st.session_state:
-        st.session_state["file_context"] = []
+    # Set all defaults that aren't already in session state
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
-    if "temperature" not in st.session_state:
-        st.session_state["temperature"] = 0.1  # Default temperature for coding
-        
-    if "refresh_chats_flag" not in st.session_state:
-        st.session_state["refresh_chats_flag"] = True
-        
-    if "save_chat_clicked" not in st.session_state:
-        st.session_state["save_chat_clicked"] = False
-        
-    if "save_chat_bottom_clicked" not in st.session_state:
-        st.session_state["save_chat_bottom_clicked"] = False
-        
-    if "chat_save_path" not in st.session_state:
-        st.session_state["chat_save_path"] = None
-
+    # Build system message after everything is loaded (this replaces the old logic)
     if "system_message" not in st.session_state:
-        st.session_state["system_message"] = DEFAULT_CONTEXT
-        if st.session_state["default_prompt"]:
-            st.session_state["system_message"] += (
-                f"\n\nDefault Prompt:\n{st.session_state['default_prompt']}"
-            )
+        update_system_message()
+
 
 # Initialize all session state values
 init_session_state()
 
 # Streamlit UI
 st.set_page_config(
-    initial_sidebar_state="auto", layout="wide", page_title="DeepSeek Chat"
+    initial_sidebar_state="auto", layout="wide", page_title="DeepSeek Chat V3.1"
 )
 
 # Sidebar
@@ -555,35 +562,28 @@ with st.sidebar:
         ):
             start_new_chat()
     with col2:
-        # Hold button state in session to prevent issues with st.button getting reset on interaction
         if "save_chat_clicked" not in st.session_state:
             st.session_state.save_chat_clicked = False
-            
-        if st.button("💾 Save Chat", key="save_chat_top", help="Save current chat") or st.session_state.save_chat_clicked:
+
+        if (
+            st.button("💾 Save Chat", key="save_chat_top", help="Save current chat")
+            or st.session_state.save_chat_clicked
+        ):
             if not st.session_state["chat_history"]:
                 st.error("No chat messages to save!")
             else:
-                # Set flag to maintain button "clicked" state during form display
                 st.session_state.save_chat_clicked = True
-                
-                # Make save form more visible
                 st.sidebar.markdown("---")
-                st.sidebar.markdown("## 📝 Save Your Chat")
-                
-                # Get chat name and description from modal
+                st.sidebar.markdown("## 💾 Save Your Chat")
                 chat_name, chat_desc = save_chat_modal()
-                
                 if chat_name:
-                    # If we got a name, save was confirmed
                     with st.spinner("Saving chat..."):
                         filename = save_chat_session(
                             st.session_state["chat_history"], chat_name, chat_desc
                         )
                         if filename:
                             st.success(f"Saved as {os.path.basename(filename)}")
-                            # Reset clicked state
                             st.session_state.save_chat_clicked = False
-                            # Force refresh to show new chat in history
                             st.session_state["refresh_chats_flag"] = True
                             st.rerun()
     st.title("Settings")
@@ -597,8 +597,16 @@ with st.sidebar:
         st.progress(min(usage / MAX_API_TOKENS, 1.0))
         st.caption(f"Context usage: {usage:,}/{MAX_API_TOKENS:,} tokens")
 
+    # NEW: Cache efficiency display for V3.1
+    if st.session_state["cache_metrics"]["hit"] > 0 or st.session_state["cache_metrics"]["miss"] > 0:
+        st.subheader("Cache Efficiency")
+        efficiency = st.session_state["cache_metrics"]["efficiency"]
+        st.metric("Cache Efficiency", f"{efficiency:.1%}")
+        st.caption(f"Hit: {st.session_state['cache_metrics']['hit']:,} tokens")
+        st.caption(f"Miss: {st.session_state['cache_metrics']['miss']:,} tokens")
+
     st.subheader("Account Balance")
-    if st.button("🔄 Refresh Balance"):
+    if st.button("💰 Refresh Balance"):
         st.session_state.balance_info = get_user_balance()
 
     if st.session_state.balance_info:
@@ -616,36 +624,16 @@ with st.sidebar:
             f"{balance.get('topped_up_balance', 0)} {balance.get('currency', 'USD')}",
         )
         st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')}")
+    elif st.session_state.balance_info is None:
+        st.info("Click 'Refresh Balance' to check your balance")
 
-    # Context size control
-    current_max_tokens = st.slider(
-        "Max Context Size (in tokens)",
-        8000,
-        128000,
-        128000,
-        help="Larger values remember more but may be slower",
-    )
-
-    # File upload
+    # File upload - UPDATED with new file types
     uploaded_files = st.file_uploader(
         "Upload files",
         type=[
-            "pdf",
-            "txt",
-            "py",
-            "md",
-            "csv",
-            "json",
-            "docx",
-            "h",
-            "ino",
-            "sh",
-            "php",
-            "js",
-            "html",
-            "cmd",
-            "map",
-            "c",
+            "pdf", "txt", "py", "md", "csv", "json", "docx", "h", "ino", "sh", 
+            "php", "js", "html", "cmd", "map", "c", "j2", "conf", "css",
+            "mk", "xml", "cfg", "service", "nmconnection"  # Added new file types
         ],
         accept_multiple_files=True,
     )
@@ -664,74 +652,29 @@ with st.sidebar:
 
             st.session_state["file_context"] = new_files
             update_system_message()
+
     if st.session_state.get("file_context"):
         if st.button(
             "🗑️ Delete All Files",
             key="delete_all_files",
             help="Remove all uploaded files at once",
         ):
-            st.session_state["file_context"] = []  # Clear all files
-            update_system_message()  # Update context
+            st.session_state["file_context"] = []
+            update_system_message()
             st.success("All uploaded files have been removed!")
-            st.rerun()  # Force immediate UI refresh
-
-    # Chat management
-    if st.session_state["chat_history"]:
-        usage = calculate_context_usage(
-            [{"role": "system", "content": st.session_state["system_message"]}]
-            + st.session_state["chat_history"]
-        )
-        st.progress(min(usage / MAX_API_TOKENS, 1.0))  # Changed from MAX_TOKENS
-        st.caption(f"Context usage: {usage:,}/{MAX_API_TOKENS:,} tokens")
-
-    # Bottom save button - similar to top save button
-    if "save_chat_bottom_clicked" not in st.session_state:
-        st.session_state.save_chat_bottom_clicked = False
-        
-    if st.button("💾 Save Current Chat", key="save_chat_bottom") or st.session_state.save_chat_bottom_clicked:
-        if not st.session_state["chat_history"]:
-            st.error("⚠️ No chat messages to save!")
-            st.info("Have a conversation first, then save.")
-        else:
-            # Set flag to maintain button "clicked" state during form display
-            st.session_state.save_chat_bottom_clicked = True
-            
-            # Make save form more visible
-            st.sidebar.markdown("---")
-            st.sidebar.markdown("## 📝 Save Your Chat")
-            
-            # Get chat name and description from modal
-            chat_name, chat_desc = save_chat_modal()
-            
-            if chat_name:
-                # If we got a name, save was confirmed
-                with st.spinner("💾 Saving chat..."):
-                    filename = save_chat_session(
-                        st.session_state["chat_history"], chat_name, chat_desc
-                    )
-                    if filename:
-                        st.success(f"✅ Saved as {os.path.basename(filename)}")
-                        # Reset clicked state
-                        st.session_state.save_chat_bottom_clicked = False
-                        # Force refresh to show new chat in history
-                        st.session_state["refresh_chats_flag"] = True
-                        st.rerun()
+            st.rerun()
 
     # Chat history section
     st.header("📚 Chat History", divider="rainbow")
 
-    # Initialize refresh flag if not present
     if "refresh_chats_flag" not in st.session_state:
         st.session_state["refresh_chats_flag"] = True
-        
-    # Get all saved chats with forced refresh
+
     saved_chats = list_saved_chats()
-    
-    # Enhanced visibility for chat history section with better styling
+
     with st.container():
         if not saved_chats:
-            st.warning("⚠️ No saved chats found. Save a chat to see it here.")
-            # Show an example of how to save a chat
+            st.warning("📝 No saved chats found. Save a chat to see it here.")
             with st.expander("How to save a chat?"):
                 st.write("1. Have a conversation in the main chat area")
                 st.write("2. Click '💾 Save Chat' at the top or bottom of the sidebar")
@@ -739,36 +682,35 @@ with st.sidebar:
                 st.write("4. Click 'Save Chat' to store it")
                 st.write("5. Your saved chat will appear here")
         else:
-            # Load metadata for display with error handling
             chat_options = []
             chat_details = {}
-            
+
             for i, chat_file in enumerate(saved_chats):
                 try:
                     with open(chat_file, "r") as f:
                         data = json.load(f)
-                        
-                    # Extract metadata
-                    name = data.get("metadata", {}).get("name", os.path.basename(chat_file))
+
+                    name = data.get("metadata", {}).get(
+                        "name", os.path.basename(chat_file)
+                    )
                     desc = data.get("metadata", {}).get("description", "")
                     created_at = data.get("metadata", {}).get("created_at", "")
-                    
-                    # Format date for display if available
+
                     if created_at:
                         try:
-                            date_display = datetime.strptime(created_at[:8], "%Y%m%d").strftime("%b %d, %Y")
+                            date_display = datetime.strptime(
+                                created_at[:8], "%Y%m%d"
+                            ).strftime("%b %d, %Y")
                         except Exception:
-                            date_display = created_at[:8] if len(created_at) >= 8 else created_at
+                            date_display = (
+                                created_at[:8] if len(created_at) >= 8 else created_at
+                            )
                     else:
                         date_display = "Unknown date"
-                        
-                    # Add date to name for better identification
+
                     display_name = f"{name} ({date_display})"
-                    
-                    # Get message count
                     message_count = len(data.get("chat_history", []))
-                    
-                    # Store details
+
                     chat_options.append(display_name)
                     chat_details[display_name] = {
                         "filename": chat_file,
@@ -777,77 +719,146 @@ with st.sidebar:
                         "original_name": name,
                         "message_count": message_count,
                     }
-                    
+
                 except Exception as e:
                     file_name = os.path.basename(chat_file)
                     display_name = f"{file_name} (Error loading)"
                     chat_options.append(display_name)
                     chat_details[display_name] = {
-                        "filename": chat_file, 
+                        "filename": chat_file,
                         "description": f"Error: {str(e)}",
                         "date": "",
                         "original_name": file_name,
                         "message_count": 0,
                     }
-            
-            # Add a manual refresh button
+
             if st.button("🔄 Refresh Chat List", key="refresh_chat_list_btn"):
                 st.session_state["refresh_chats_flag"] = True
                 st.rerun()
-            
+
             if chat_options:
-                # Always show saved chats (no expander)
                 st.markdown("### Select a saved chat")
                 selected_name = st.selectbox(
-                    "Available chats:", 
-                    chat_options, 
+                    "Available chats:",
+                    chat_options,
                     key="saved_chat_selector",
-                    format_func=lambda x: f"{x} ({chat_details[x].get('message_count', 0)} messages)" if x in chat_details else x
+                    format_func=lambda x: f"{x} ({chat_details[x].get('message_count', 0)} messages)"
+                    if x in chat_details
+                    else x,
                 )
-                
+
                 if selected_name:
-                    # Show description and metadata if available
                     with st.container():
                         if chat_details[selected_name]["description"]:
                             st.info(chat_details[selected_name]["description"])
-                        
-                        # Show message count
+
                         if chat_details[selected_name].get("message_count", 0) > 0:
-                            st.caption(f"Contains {chat_details[selected_name]['message_count']} messages")
-                        
-                        # Show file details
-                        st.caption(f"File: {os.path.basename(chat_details[selected_name]['filename'])}")
-                        
+                            st.caption(
+                                f"Contains {chat_details[selected_name]['message_count']} messages"
+                            )
+
+                        st.caption(
+                            f"File: {os.path.basename(chat_details[selected_name]['filename'])}"
+                        )
+
                         col1, col2 = st.columns(2)
                         with col1:
-                            if st.button("📂 Load Chat", key="load_chat_btn", use_container_width=True):
+                            if st.button(
+                                "📥 Load Chat",
+                                key="load_chat_btn",
+                                use_container_width=True,
+                            ):
                                 try:
-                                    with st.spinner(f"Loading {chat_details[selected_name]['original_name']}..."):
-                                        data = load_chat_session(chat_details[selected_name]["filename"])
+                                    with st.spinner(
+                                        f"Loading {chat_details[selected_name]['original_name']}..."
+                                    ):
+                                        data = load_chat_session(
+                                            chat_details[selected_name]["filename"]
+                                        )
                                         st.session_state.update(
                                             {
                                                 "chat_history": data["chat_history"],
                                                 "default_prompt": data["default_prompt"],
                                                 "file_context": data["file_context"],
                                                 "system_message": data["system_message"],
+                                                "reasoning_content": data.get("reasoning_content", None),
                                             }
                                         )
-                                        st.success(f"Loaded: {chat_details[selected_name]['original_name']}")
+                                        st.success(
+                                            f"Loaded: {chat_details[selected_name]['original_name']}"
+                                        )
                                         st.rerun()
                                 except Exception as e:
                                     st.error(f"Failed to load chat: {e}")
                         with col2:
-                            if st.button("🗑️ Delete", key="delete_chat_btn", use_container_width=True):
+                            if st.button(
+                                "🗑️ Delete",
+                                key="delete_chat_btn",
+                                use_container_width=True,
+                            ):
                                 try:
                                     full_path = chat_details[selected_name]["filename"]
                                     os.remove(full_path)
-                                    st.success(f"Deleted {chat_details[selected_name]['original_name']}")
+                                    st.success(
+                                        f"Deleted {chat_details[selected_name]['original_name']}"
+                                    )
                                     st.rerun()
                                 except Exception as e:
                                     st.error(f"Error deleting file: {e}")
 
-    # Advanced Settings moved to bottom of sidebar
+    # Advanced Settings
     with st.expander("Advanced Settings"):
+        # Model selection - UPDATED for V3.1
+        model_choice = st.selectbox(
+            "Model", 
+            MODELS, 
+            index=0, 
+            key="model_select",
+            help="deepseek-chat: Standard mode | deepseek-reasoner: Thinking mode with reasoning"
+        )
+
+        # NEW: Reasoning content display for deepseek-reasoner
+        if st.session_state["model_select"] == "deepseek-reasoner":
+            if st.session_state.get("reasoning_content"):
+                with st.expander("View Reasoning Content", expanded=False):
+                    st.text_area(
+                        "Reasoning Chain",
+                        value=st.session_state["reasoning_content"],
+                        height=200,
+                        disabled=True,
+                        label_visibility="collapsed"
+                    )
+
+        # Task selection
+        task_type = st.selectbox(
+            "Task Type",
+            ["Coding/Math", "Normal Questions", "Data Analysis", "Creative Writing"],
+            index=0,
+            key="task_type_select",
+        )
+
+        # Dynamic temperature - UPDATED for reasoning model constraints
+        temp_ranges = {
+            "Coding/Math": (0.0, 0.3),
+            "Data Analysis": (0.3, 0.7),
+            "Normal Questions": (0.5, 0.9),
+            "Creative Writing": (0.8, 1.5),
+        }
+
+        # For reasoning model, temperature has no effect per documentation
+        if st.session_state["model_select"] == "deepseek-reasoner":
+            st.info("⚠️ Temperature has no effect on deepseek-reasoner model")
+            st.session_state["temperature"] = 0.0
+        else:
+            min_temp, max_temp = temp_ranges.get(task_type, (0.3, 0.7))
+            st.session_state["temperature"] = st.slider(
+                "Temperature",
+                min_temp,
+                max_temp,
+                0.1,
+                key="temp_slider",
+            )
+
         # Default prompt section
         default_prompt = st.text_area(
             "Set Default Prompt",
@@ -867,34 +878,7 @@ with st.sidebar:
                 update_system_message()
                 st.success("Default prompt cleared!")
 
-        # Model selection
-        model_choice = st.selectbox("Model", MODELS, index=0, key="model_select")
-
-        # Task selection
-        task_type = st.selectbox(
-            "Task Type",
-            ["Coding/Math", "Normal Questions", "Data Analysis", "Creative Writing"],
-            index=0,  # Default to Coding/Math
-            key="task_type_select",
-        )
-
-        # Dynamic temperature
-        temp_ranges = {
-            "Coding/Math": (0.0, 0.3),
-            "Data Analysis": (0.3, 0.7),
-            "Normal Questions": (0.5, 0.9),
-            "Creative Writing": (0.8, 1.5),
-        }
-        min_temp, max_temp = temp_ranges.get(task_type, (0.3, 0.7))
-        st.session_state["temperature"] = st.slider(
-            "Temperature",
-            min_temp,
-            max_temp,
-            0.1,  # Default temperature for coding
-            key="temp_slider",
-        )
-
-# Main chat area (keep this the same as before)
+# Main chat area
 for msg in st.session_state["chat_history"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
@@ -918,35 +902,83 @@ if prompt := st.chat_input("Message DeepSeek..."):
                 f"High context usage: {usage}/{MAX_API_TOKENS} tokens (API limit)"
             )
 
-        response = client.chat.completions.create(
-            model=st.session_state["model_select"],  # Use the selected model
-            messages=messages[-30:],
-            stream=True,
-            temperature=st.session_state["temperature"],
-        )
-
-        full_response = ""
-        container = st.empty()
-        for chunk in response:
-            if chunk.choices and chunk.choices[0].delta.content:
-                full_response += chunk.choices[0].delta.content
-                with container.container():
-                    with st.chat_message("assistant"):
-                        st.markdown(full_response + "▌")  # Using standard cursor symbol
-
-        st.session_state["chat_history"].append(
-            {"role": "assistant", "content": full_response}
-        )
-
-        # Show cache info if available
         try:
-            if hasattr(response, "usage"):
-                cache_hit = getattr(response.usage, "prompt_cache_hit_tokens", 0)
-                cache_miss = getattr(response.usage, "prompt_cache_miss_tokens", 0)
-                if cache_hit or cache_miss:
-                    st.sidebar.info(
-                        f"Cache efficiency: {cache_hit / (cache_hit + cache_miss):.1%}\n"
-                        f"Hit: {cache_hit}, Miss: {cache_miss}"
-                    )
-        except Exception:
-            pass
+            # UPDATED for V3.1: Handle reasoning model differently
+            if st.session_state["model_select"] == "deepseek-reasoner":
+                response = client.chat.completions.create(
+                    model="deepseek-reasoner",
+                    messages=messages[-30:],
+                    stream=True,
+                    max_tokens=MAX_OUTPUT_TOKENS_REASONER,
+                )
+            else:
+                response = client.chat.completions.create(
+                    model=st.session_state["model_select"],
+                    messages=messages[-30:],
+                    stream=True,
+                    temperature=st.session_state["temperature"],
+                    max_tokens=MAX_OUTPUT_TOKENS_CHAT,
+                )
+
+            full_response = ""
+            reasoning_content = ""
+            container = st.empty()
+
+            for chunk in response:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    full_response += chunk.choices[0].delta.content
+                    with container.container():
+                        with st.chat_message("assistant"):
+                            st.markdown(full_response + "▌")
+
+                # NEW: Capture reasoning content for deepseek-reasoner
+                if (st.session_state["model_select"] == "deepseek-reasoner" and 
+                    chunk.choices and hasattr(chunk.choices[0].delta, 'reasoning_content') and 
+                    chunk.choices[0].delta.reasoning_content):
+                    reasoning_content += chunk.choices[0].delta.reasoning_content
+
+            # Store reasoning content for deepseek-reasoner
+            if st.session_state["model_select"] == "deepseek-reasoner":
+                st.session_state["reasoning_content"] = reasoning_content
+                if reasoning_content:
+                    with st.expander("View Reasoning Process", expanded=False):
+                        st.text_area(
+                            "Chain of Thought",
+                            value=reasoning_content,
+                            height=200,
+                            disabled=True,
+                            label_visibility="collapsed"
+                        )
+
+            st.session_state["chat_history"].append(
+                {"role": "assistant", "content": full_response}
+            )
+
+            # NEW: Update cache metrics from API response
+            try:
+                if hasattr(response, 'usage'):
+                    cache_hit = getattr(response.usage, "prompt_cache_hit_tokens", 0)
+                    cache_miss = getattr(response.usage, "prompt_cache_miss_tokens", 0)
+
+                    if cache_hit or cache_miss:
+                        total = cache_hit + cache_miss
+                        efficiency = cache_hit / total if total > 0 else 0
+
+                        st.session_state["cache_metrics"] = {
+                            "hit": cache_hit,
+                            "miss": cache_miss,
+                            "efficiency": efficiency
+                        }
+
+                        st.sidebar.info(
+                            f"Cache efficiency: {efficiency:.1%}\n"
+                            f"Hit: {cache_hit:,} tokens\n"
+                            f"Miss: {cache_miss:,} tokens"
+                        )
+            except Exception as e:
+                st.sidebar.warning(f"Could not retrieve cache metrics: {e}")
+
+        except Exception as e:
+            st.error(f"API Error: {str(e)}")
+            if "rate limit" in str(e).lower():
+                st.info("You've hit the rate limit. Please try again in a moment.")
